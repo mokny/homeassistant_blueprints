@@ -1,9 +1,9 @@
 blueprint:
-  name: "Intelligente Heizungssteuerung – Multi-Thermostat v4"
+  name: "Intelligente Heizungssteuerung – Multi-Thermostat v5"
   description: >
     Zentrale Heizungssteuerung für beliebig viele Heizkörperthermostate.
 
-    Version: v4
+    Version: v5
 
     Funktionen:
       - beliebig viele Thermostate
@@ -13,6 +13,8 @@ blueprint:
       - einstellbare Fenster-Offen-Verzögerung
       - Anwesenheits-/Abwesenheitserkennung über mehrere Personen
       - wählbare Anwesenheitslogik
+      - manueller Absenkschalter, der Anwesenheit übersteuert
+      - optionaler automatischer Reset des Absenkschalters zu einer Uhrzeit
       - Normalbetrieb im HVAC-Modus AUTO
       - Sommermodus mit Frostschutztemperatur und HVAC OFF
       - automatische Ventilwartung im Sommer
@@ -142,6 +144,37 @@ blueprint:
             - label: "Mindestens eine ausgewählte Person ist abwesend"
               value: any_away
 
+    setback_override_switch:
+      name: Manueller Absenkschalter
+      description: >
+        input_boolean für eine erzwungene Absenkung, zum Beispiel nachts.
+        Solange dieser Schalter EIN ist, verwenden alle Thermostate die
+        jeweilige Absenktemperatur – auch wenn Personen zuhause sind.
+        Sommermodus und Fenster-Offen-Erkennung haben weiterhin Vorrang.
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
+
+    setback_override_reset_enabled:
+      name: Absenkschalter automatisch zurücksetzen
+      description: >
+        Wenn aktiviert, wird der manuelle Absenkschalter jeden Tag zur
+        festgelegten Uhrzeit automatisch ausgeschaltet.
+      default: false
+      selector:
+        boolean:
+
+    setback_override_reset_time:
+      name: Reset-Uhrzeit des Absenkschalters
+      description: >
+        Uhrzeit, zu der der manuelle Absenkschalter automatisch ausgeschaltet
+        wird. Diese Einstellung wird nur verwendet, wenn der automatische
+        Reset aktiviert ist.
+      default: "06:00:00"
+      selector:
+        time:
+
     summer_temperature:
       name: Frostschutztemperatur Sommer
       default: 5
@@ -227,27 +260,37 @@ variables:
   summer_mode: !input summer_mode
   persons: !input persons
   absence_logic: !input absence_logic
+  setback_override_switch: !input setback_override_switch
+  setback_override_reset_enabled: !input setback_override_reset_enabled
+  setback_override_reset_time: !input setback_override_reset_time
   summer_temperature: !input summer_temperature
   valve_maintenance_enabled: !input valve_maintenance_enabled
   valve_maintenance_interval: !input valve_maintenance_interval
   valve_maintenance_time: !input valve_maintenance_time
   notifications_enabled: !input notifications_enabled
 
+  forced_setback_active: >
+    {{ is_state(setback_override_switch, 'on') }}
+
   use_setback: >
-    {% set person_states = expand(persons) %}
-    {% set total = person_states | count %}
-    {% set home_count =
-      person_states
-      | selectattr('state', 'eq', 'home')
-      | list
-      | count
-    %}
-    {% if total == 0 %}
-      false
-    {% elif absence_logic == 'any_away' %}
-      {{ home_count < total }}
+    {% if is_state(setback_override_switch, 'on') %}
+      true
     {% else %}
-      {{ home_count == 0 }}
+      {% set person_states = expand(persons) %}
+      {% set total = person_states | count %}
+      {% set home_count =
+        person_states
+        | selectattr('state', 'eq', 'home')
+        | list
+        | count
+      %}
+      {% if total == 0 %}
+        false
+      {% elif absence_logic == 'any_away' %}
+        {{ home_count < total }}
+      {% else %}
+        {{ home_count == 0 }}
+      {% endif %}
     {% endif %}
 
 triggers:
@@ -263,11 +306,33 @@ triggers:
     entity_id: !input persons
     id: presence_changed
 
+  - trigger: state
+    entity_id: !input setback_override_switch
+    id: setback_override_changed
+
+  - trigger: time
+    at: !input setback_override_reset_time
+    id: setback_override_reset_time
+
   - trigger: homeassistant
     event: start
     id: homeassistant_start
 
 actions:
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: setback_override_reset_time
+          - condition: template
+            value_template: "{{ setback_override_reset_enabled | bool }}"
+          - condition: state
+            entity_id: !input setback_override_switch
+            state: "on"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: !input setback_override_switch
+
   - variables:
       maintenance_due: >
         {% set enabled = valve_maintenance_enabled | bool %}
@@ -487,7 +552,9 @@ actions:
                       {% endif %}
 
                     desired_reason: >
-                      {% if use_setback | bool %}
+                      {% if forced_setback_active | bool %}
+                        Manueller Absenkschalter
+                      {% elif use_setback | bool %}
                         Abwesenheit
                       {% else %}
                         Komfortbetrieb
