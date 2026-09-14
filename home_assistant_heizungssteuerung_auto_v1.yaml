@@ -1,9 +1,9 @@
 blueprint:
-  name: "Intelligente Heizungssteuerung – Multi-Thermostat v5"
+  name: "Intelligente Heizungssteuerung – Multi-Thermostat v6"
   description: >
     Zentrale Heizungssteuerung für beliebig viele Heizkörperthermostate.
 
-    Version: v5
+    Version: v6
 
     Funktionen:
       - beliebig viele Thermostate
@@ -21,7 +21,7 @@ blueprint:
       - konfigurierbares Wartungsintervall
       - automatische Wiederherstellung nach Fenster-Schließen
       - automatische Synchronisation nach Home-Assistant-Neustart
-      - optionale frei konfigurierbare Benachrichtigungsaktion
+      - mehrere Notify-Ziele mit individuell wählbaren Benachrichtigungstypen
 
     Priorität:
       1. Sommermodus / Ventilwartung
@@ -237,23 +237,55 @@ blueprint:
       selector:
         duration:
 
-    notifications_enabled:
-      name: Benachrichtigungen aktivieren
-      default: false
-      selector:
-        boolean:
-
-    notification_action:
-      name: Benachrichtigungsaktion
+    notification_targets:
+      name: Benachrichtigungsgeräte / Notify-Ziele
       description: >
-        Optionale Aktion für Benachrichtigungen.
-
-        Verfügbare Template-Variablen:
-          {{ heating_event }}
-          {{ heating_message }}
+        Füge beliebig viele Notify-Ziele hinzu. Für jedes Ziel kannst du
+        separat auswählen, welche Heizungsereignisse gesendet werden sollen.
+        Angezeigt werden Home-Assistant-Entities aus der Domain notify.
       default: []
       selector:
-        action:
+        object:
+          multiple: true
+          label_field: name
+          description_field: notify_entity
+          fields:
+            name:
+              label: Name
+              required: true
+              selector:
+                text:
+
+            notify_entity:
+              label: Notify-Ziel
+              required: true
+              selector:
+                entity:
+                  filter:
+                    - domain: notify
+
+            events:
+              label: Zu sendende Benachrichtigungen
+              required: true
+              selector:
+                select:
+                  multiple: true
+                  mode: dropdown
+                  options:
+                    - label: "Fenster offen / Heizung ausgeschaltet"
+                      value: window_open
+                    - label: "Sommermodus"
+                      value: summer_mode
+                    - label: "Absenkung wegen Abwesenheit"
+                      value: absence_setback
+                    - label: "Absenkung durch manuellen Absenkschalter"
+                      value: manual_setback
+                    - label: "Komfortbetrieb / Absenkung beendet"
+                      value: comfort_mode
+                    - label: "Ventilwartung gestartet"
+                      value: maintenance_start
+                    - label: "Ventilwartung beendet"
+                      value: maintenance_end
 
 variables:
   thermostat_config: !input thermostat_config
@@ -267,7 +299,7 @@ variables:
   valve_maintenance_enabled: !input valve_maintenance_enabled
   valve_maintenance_interval: !input valve_maintenance_interval
   valve_maintenance_time: !input valve_maintenance_time
-  notifications_enabled: !input notifications_enabled
+  notification_targets: !input notification_targets
 
   forced_setback_active: >
     {{ is_state(setback_override_switch, 'on') }}
@@ -355,16 +387,28 @@ actions:
             value_template: "{{ maintenance_due | bool }}"
         sequence:
           - variables:
+              notification_event_type: "maintenance_start"
               heating_event: "Heizung: Ventilwartung gestartet"
               heating_message: >
                 Die automatische Ventilwartung wurde gestartet.
                 {{ thermostat_config | count }} Heizkörper werden geöffnet.
 
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ notifications_enabled | bool }}"
-                sequence: !input notification_action
+          - repeat:
+              for_each: "{{ notification_targets }}"
+              sequence:
+                - choose:
+                    - conditions:
+                        - condition: template
+                          value_template: >
+                            {{ notification_event_type in (repeat.item.events | default([])) }}
+                      sequence:
+                        - action: notify.send_message
+                          target:
+                            entity_id: "{{ repeat.item.notify_entity }}"
+                          data:
+                            title: "{{ heating_event }}"
+                            message: "{{ heating_message }}"
+                          continue_on_error: true
 
           - repeat:
               for_each: "{{ thermostat_config }}"
@@ -409,16 +453,28 @@ actions:
                   continue_on_error: true
 
           - variables:
+              notification_event_type: "maintenance_end"
               heating_event: "Heizung: Ventilwartung beendet"
               heating_message: >
                 Die Ventilwartung wurde beendet.
                 Alle Heizkörper wurden wieder in den Sommermodus versetzt.
 
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ notifications_enabled | bool }}"
-                sequence: !input notification_action
+          - repeat:
+              for_each: "{{ notification_targets }}"
+              sequence:
+                - choose:
+                    - conditions:
+                        - condition: template
+                          value_template: >
+                            {{ notification_event_type in (repeat.item.events | default([])) }}
+                      sequence:
+                        - action: notify.send_message
+                          target:
+                            entity_id: "{{ repeat.item.notify_entity }}"
+                          data:
+                            title: "{{ heating_event }}"
+                            message: "{{ heating_message }}"
+                          continue_on_error: true
 
           - stop: "Ventilwartung abgeschlossen."
 
@@ -498,17 +554,29 @@ actions:
                       continue_on_error: true
 
                     - variables:
+                        notification_event_type: "summer_mode"
                         heating_event: "Heizung: Sommermodus"
                         heating_message: >
                           {{ radiator_name }} wurde auf
                           {{ summer_temperature }} °C gestellt
                           und ausgeschaltet.
 
-                    - choose:
-                        - conditions:
-                            - condition: template
-                              value_template: "{{ notifications_enabled | bool }}"
-                          sequence: !input notification_action
+                    - repeat:
+                        for_each: "{{ notification_targets }}"
+                        sequence:
+                          - choose:
+                              - conditions:
+                                  - condition: template
+                                    value_template: >
+                                      {{ notification_event_type in (repeat.item.events | default([])) }}
+                                sequence:
+                                  - action: notify.send_message
+                                    target:
+                                      entity_id: "{{ repeat.item.notify_entity }}"
+                                    data:
+                                      title: "{{ heating_event }}"
+                                      message: "{{ heating_message }}"
+                                    continue_on_error: true
 
           default:
             - choose:
@@ -528,6 +596,7 @@ actions:
                           continue_on_error: true
 
                         - variables:
+                            notification_event_type: "window_open"
                             heating_event: "Heizung: Fenster offen"
                             heating_message: >
                               {{ radiator_name }} wurde ausgeschaltet,
@@ -536,11 +605,22 @@ actions:
                               {{ window_delay_minutes | round(0) }}
                               Minuten geöffnet ist.
 
-                        - choose:
-                            - conditions:
-                                - condition: template
-                                  value_template: "{{ notifications_enabled | bool }}"
-                              sequence: !input notification_action
+                        - repeat:
+                            for_each: "{{ notification_targets }}"
+                            sequence:
+                              - choose:
+                                  - conditions:
+                                      - condition: template
+                                        value_template: >
+                                          {{ notification_event_type in (repeat.item.events | default([])) }}
+                                    sequence:
+                                      - action: notify.send_message
+                                        target:
+                                          entity_id: "{{ repeat.item.notify_entity }}"
+                                        data:
+                                          title: "{{ heating_event }}"
+                                          message: "{{ heating_message }}"
+                                        continue_on_error: true
 
               default:
                 - variables:
@@ -592,17 +672,36 @@ actions:
                       continue_on_error: true
 
                     - variables:
+                        notification_event_type: >
+                          {% if forced_setback_active | bool %}
+                            manual_setback
+                          {% elif use_setback | bool %}
+                            absence_setback
+                          {% else %}
+                            comfort_mode
+                          {% endif %}
                         heating_event: "Heizung: {{ desired_reason }}"
                         heating_message: >
                           {{ radiator_name }} wurde auf
                           {{ desired_temperature }} °C gestellt.
                           Grund: {{ desired_reason }}.
 
-                    - choose:
-                        - conditions:
-                            - condition: template
-                              value_template: "{{ notifications_enabled | bool }}"
-                          sequence: !input notification_action
+                    - repeat:
+                        for_each: "{{ notification_targets }}"
+                        sequence:
+                          - choose:
+                              - conditions:
+                                  - condition: template
+                                    value_template: >
+                                      {{ notification_event_type in (repeat.item.events | default([])) }}
+                                sequence:
+                                  - action: notify.send_message
+                                    target:
+                                      entity_id: "{{ repeat.item.notify_entity }}"
+                                    data:
+                                      title: "{{ heating_event }}"
+                                      message: "{{ heating_message }}"
+                                    continue_on_error: true
 
 mode: single
 max_exceeded: silent
