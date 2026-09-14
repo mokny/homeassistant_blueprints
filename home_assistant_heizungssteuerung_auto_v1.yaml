@@ -1,8 +1,11 @@
 ```yaml
 blueprint:
-  name: "Intelligente Heizungssteuerung – Multi-Thermostat"
+  name: "Intelligente Heizungssteuerung – Multi-Thermostat v2"
   description: >
     Zentrale Heizungssteuerung für beliebig viele Heizkörperthermostate.
+
+    Version: v2
+
     Funktionen:
       - beliebig viele Thermostate
       - individuelle Komforttemperatur je Thermostat
@@ -18,6 +21,7 @@ blueprint:
       - automatische Wiederherstellung nach Fenster-Schließen
       - automatische Synchronisation nach Home-Assistant-Neustart
       - optionale frei konfigurierbare Benachrichtigungsaktion
+
     Priorität:
       1. Sommermodus / Ventilwartung
       2. Fenster offen
@@ -76,6 +80,7 @@ blueprint:
 
             windows:
               label: Fenster / Türen
+              required: false
               selector:
                 entity:
                   multiple: true
@@ -126,6 +131,7 @@ blueprint:
       description: >
         "Alle abwesend": Absenkung erst, wenn keine ausgewählte Person
         mehr zuhause ist.
+
         "Eine Person abwesend": Absenkung, sobald mindestens eine der
         ausgewählten Personen nicht zuhause ist.
       default: all_away
@@ -146,6 +152,7 @@ blueprint:
           max: 15
           step: 0.5
           unit_of_measurement: "°C"
+          mode: slider
 
     valve_maintenance_enabled:
       name: Ventilwartung aktivieren
@@ -185,6 +192,7 @@ blueprint:
           max: 35
           step: 0.5
           unit_of_measurement: "°C"
+          mode: slider
 
     valve_maintenance_duration:
       name: Dauer der Ventilwartung
@@ -207,6 +215,7 @@ blueprint:
       name: Benachrichtigungsaktion
       description: >
         Optionale Aktion für Benachrichtigungen.
+
         Verfügbare Template-Variablen:
           {{ heating_event }}
           {{ heating_message }}
@@ -228,10 +237,13 @@ variables:
   use_setback: >
     {% set person_states = expand(persons) %}
     {% set total = person_states | count %}
-    {% set home_count = person_states
+    {% set home_count =
+      person_states
       | selectattr('state', 'eq', 'home')
       | list
-      | count %}
+      | count
+    %}
+
     {% if total == 0 %}
       false
     {% elif absence_logic == 'any_away' %}
@@ -260,12 +272,13 @@ triggers:
 actions:
   - variables:
       maintenance_due: >
-        {% set enabled = valve_maintenance_enabled %}
+        {% set enabled = valve_maintenance_enabled | bool %}
         {% set summer = is_state(summer_mode, 'on') %}
         {% set interval = valve_maintenance_interval | int(14) %}
         {% set configured_time = valve_maintenance_time | string %}
         {% set current_time = now().strftime('%H:%M') %}
         {% set wanted_time = configured_time[0:5] %}
+
         {{
           enabled
           and summer
@@ -353,30 +366,39 @@ actions:
         - variables:
             radiator_name: "{{ repeat.item.name }}"
             thermostat: "{{ repeat.item.thermostat }}"
+
             comfort_temperature: >
               {{ repeat.item.comfort_temperature | float }}
+
             setback_temperature: >
               {{ repeat.item.setback_temperature | float }}
+
             window_delay_minutes: >
               {{ repeat.item.window_open_delay | default(0) | float }}
 
             window_blocked: >
               {% set ns = namespace(blocked=false) %}
               {% set delay_seconds =
-                (repeat.item.window_open_delay | default(0) | float) * 60 %}
+                (repeat.item.window_open_delay | default(0) | float) * 60
+              %}
+
               {% for window in repeat.item.windows | default([]) %}
                 {% if is_state(window, 'on') %}
                   {% set window_state = states.get(window) %}
+
                   {% if window_state is not none %}
                     {% set open_seconds =
                       as_timestamp(now())
-                      - as_timestamp(window_state.last_changed) %}
+                      - as_timestamp(window_state.last_changed)
+                    %}
+
                     {% if open_seconds >= delay_seconds %}
                       {% set ns.blocked = true %}
                     {% endif %}
                   {% endif %}
                 {% endif %}
               {% endfor %}
+
               {{ ns.blocked }}
 
             current_hvac_mode: "{{ states(repeat.item.thermostat) }}"
@@ -484,7 +506,6 @@ actions:
                         Komfortbetrieb
                       {% endif %}
 
-                # Normalbetrieb läuft konsequent im HVAC-Modus AUTO.
                 - if:
                     - condition: template
                       value_template: >
