@@ -1,9 +1,9 @@
 blueprint:
-  name: "Intelligente Heizungssteuerung – Multi-Thermostat v6"
+  name: "Intelligente Heizungssteuerung – Multi-Thermostat v7"
   description: >
     Zentrale Heizungssteuerung für beliebig viele Heizkörperthermostate.
 
-    Version: v6
+    Version: v7
 
     Funktionen:
       - beliebig viele Thermostate
@@ -11,6 +11,8 @@ blueprint:
       - individuelle Absenktemperatur je Thermostat
       - beliebig viele Fensterkontakte je Thermostat
       - einstellbare Fenster-Offen-Verzögerung
+      - Fensterkontakte lösen die Automation sofort bei Zustandsänderung aus
+      - 15-Sekunden-Fallback für zuverlässige Fenster-Verzögerungen
       - Anwesenheits-/Abwesenheitserkennung über mehrere Personen
       - wählbare Anwesenheitslogik
       - manueller Absenkschalter, der Anwesenheit übersteuert
@@ -22,6 +24,7 @@ blueprint:
       - automatische Wiederherstellung nach Fenster-Schließen
       - automatische Synchronisation nach Home-Assistant-Neustart
       - mehrere Notify-Ziele mit individuell wählbaren Benachrichtigungstypen
+      - optionaler Master-Schalter zum vollständigen Deaktivieren der Steuerung
 
     Priorität:
       1. Sommermodus / Ventilwartung
@@ -102,6 +105,19 @@ blueprint:
                   step: 1
                   unit_of_measurement: min
                   mode: box
+
+    master_enable_switch:
+      name: Optionaler Master-Schalter
+      description: >
+        Optionaler input_boolean zum Aktivieren oder Deaktivieren der gesamten
+        Heizungssteuerung. Wenn kein Schalter ausgewählt ist, ist die Steuerung
+        immer aktiv. Wenn ein Schalter ausgewählt ist, arbeitet die Automation
+        nur solange dieser Schalter EIN ist.
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: input_boolean
 
     summer_mode:
       name: Sommermodus
@@ -289,6 +305,7 @@ blueprint:
 
 variables:
   thermostat_config: !input thermostat_config
+  master_enable_switch: !input master_enable_switch
   summer_mode: !input summer_mode
   persons: !input persons
   absence_logic: !input absence_logic
@@ -326,9 +343,18 @@ variables:
     {% endif %}
 
 triggers:
+  # Fallback/Watchdog für Fenster-Offen-Verzögerungen.
   - trigger: time_pattern
-    minutes: "/1"
+    seconds: "/15"
     id: periodic
+
+  # Direkter Trigger für Änderungen an Fenster-/Türkontakten.
+  # Weil die Fenster dynamisch in thermostat_config definiert werden,
+  # lauscht der Blueprint auf state_changed und filtert danach auf die
+  # tatsächlich konfigurierten Fenster.
+  - trigger: event
+    event_type: state_changed
+    id: window_state_changed
 
   - trigger: state
     entity_id: !input summer_mode
@@ -351,6 +377,49 @@ triggers:
     id: homeassistant_start
 
 actions:
+  - variables:
+      master_control_active: >
+        {{
+          (master_enable_switch | string | trim == '')
+          or is_state(master_enable_switch, 'on')
+        }}
+
+      configured_window_entities: >
+        {% set ns = namespace(items=[]) %}
+        {% for cfg in thermostat_config %}
+          {% for window in cfg.windows | default([]) %}
+            {% if window not in ns.items %}
+              {% set ns.items = ns.items + [window] %}
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+        {{ ns.items }}
+
+      window_trigger_relevant: >
+        {% if trigger.id != 'window_state_changed' %}
+          true
+        {% else %}
+          {% set entity_id = trigger.event.data.entity_id | default('') %}
+          {% set old_state = trigger.event.data.old_state %}
+          {% set new_state = trigger.event.data.new_state %}
+          {{
+            entity_id in configured_window_entities
+            and old_state is not none
+            and new_state is not none
+            and old_state.state != new_state.state
+          }}
+        {% endif %}
+
+  # Wenn ein Master-Schalter konfiguriert und ausgeschaltet ist,
+  # endet die Automation sofort und greift nicht in die Heizung ein.
+  - condition: template
+    value_template: "{{ master_control_active | bool }}"
+
+  # Bei globalen state_changed-Events nur auf tatsächlich konfigurierte
+  # Fenster-/Türkontakte reagieren.
+  - condition: template
+    value_template: "{{ window_trigger_relevant | bool }}"
+
   - choose:
       - conditions:
           - condition: trigger
@@ -491,6 +560,9 @@ actions:
             window_delay_minutes: >
               {{ repeat.item.window_open_delay | default(0) | float }}
 
+            # Öffnen/Schließen wird sofort ausgewertet.
+            # Die eingestellte Offen-Verzögerung bleibt erhalten; der
+            # 15-Sekunden-Watchdog erkennt das Überschreiten zuverlässig.
             window_blocked: >
               {% set ns = namespace(blocked=false) %}
               {% set delay_seconds =
