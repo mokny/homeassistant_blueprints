@@ -1,8 +1,8 @@
+```yaml
 blueprint:
   name: "Intelligente Heizungssteuerung – Multi-Thermostat"
   description: >
     Zentrale Heizungssteuerung für beliebig viele Heizkörperthermostate.
-
     Funktionen:
       - beliebig viele Thermostate
       - individuelle Komforttemperatur je Thermostat
@@ -18,7 +18,6 @@ blueprint:
       - automatische Wiederherstellung nach Fenster-Schließen
       - automatische Synchronisation nach Home-Assistant-Neustart
       - optionale frei konfigurierbare Benachrichtigungsaktion
-
     Priorität:
       1. Sommermodus / Ventilwartung
       2. Fenster offen
@@ -89,9 +88,6 @@ blueprint:
 
             window_open_delay:
               label: Abschaltverzögerung Fenster
-              description: >
-                Wie lange mindestens ein Fenster geöffnet sein muss,
-                bevor der Heizkörper abgeschaltet wird.
               required: true
               selector:
                 number:
@@ -116,6 +112,9 @@ blueprint:
       name: Personen für Anwesenheitserkennung
       description: >
         Personen, deren Home/Away-Status berücksichtigt werden soll.
+        Wenn keine Person ausgewählt ist, wird keine Absenkung aufgrund
+        von Abwesenheit durchgeführt.
+      default: []
       selector:
         entity:
           multiple: true
@@ -127,7 +126,6 @@ blueprint:
       description: >
         "Alle abwesend": Absenkung erst, wenn keine ausgewählte Person
         mehr zuhause ist.
-
         "Eine Person abwesend": Absenkung, sobald mindestens eine der
         ausgewählten Personen nicht zuhause ist.
       default: all_away
@@ -209,7 +207,6 @@ blueprint:
       name: Benachrichtigungsaktion
       description: >
         Optionale Aktion für Benachrichtigungen.
-
         Verfügbare Template-Variablen:
           {{ heating_event }}
           {{ heating_message }}
@@ -229,12 +226,18 @@ variables:
   notifications_enabled: !input notifications_enabled
 
   use_setback: >
-    {% if persons | count == 0 %}
+    {% set person_states = expand(persons) %}
+    {% set total = person_states | count %}
+    {% set home_count = person_states
+      | selectattr('state', 'eq', 'home')
+      | list
+      | count %}
+    {% if total == 0 %}
       false
     {% elif absence_logic == 'any_away' %}
-      {{ (persons | select('is_state', 'home') | list | count) < (persons | count) }}
+      {{ home_count < total }}
     {% else %}
-      {{ (persons | select('is_state', 'home') | list | count) == 0 }}
+      {{ home_count == 0 }}
     {% endif %}
 
 triggers:
@@ -260,7 +263,7 @@ actions:
         {% set enabled = valve_maintenance_enabled %}
         {% set summer = is_state(summer_mode, 'on') %}
         {% set interval = valve_maintenance_interval | int(14) %}
-        {% set configured_time = valve_maintenance_time|string %}
+        {% set configured_time = valve_maintenance_time | string %}
         {% set current_time = now().strftime('%H:%M') %}
         {% set wanted_time = configured_time[0:5] %}
         {{
@@ -274,7 +277,7 @@ actions:
   - choose:
       - conditions:
           - condition: template
-            value_template: "{{ maintenance_due }}"
+            value_template: "{{ maintenance_due | bool }}"
         sequence:
           - variables:
               heating_event: "Heizung: Ventilwartung gestartet"
@@ -285,7 +288,7 @@ actions:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ notifications_enabled }}"
+                    value_template: "{{ notifications_enabled | bool }}"
                 sequence: !input notification_action
 
           - repeat:
@@ -339,7 +342,7 @@ actions:
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ notifications_enabled }}"
+                    value_template: "{{ notifications_enabled | bool }}"
                 sequence: !input notification_action
 
           - stop: "Ventilwartung abgeschlossen."
@@ -350,27 +353,41 @@ actions:
         - variables:
             radiator_name: "{{ repeat.item.name }}"
             thermostat: "{{ repeat.item.thermostat }}"
-            comfort_temperature: "{{ repeat.item.comfort_temperature | float }}"
-            setback_temperature: "{{ repeat.item.setback_temperature | float }}"
-            window_delay_minutes: "{{ repeat.item.window_open_delay | default(0) | float }}"
+            comfort_temperature: >
+              {{ repeat.item.comfort_temperature | float }}
+            setback_temperature: >
+              {{ repeat.item.setback_temperature | float }}
+            window_delay_minutes: >
+              {{ repeat.item.window_open_delay | default(0) | float }}
 
             window_blocked: >
               {% set ns = namespace(blocked=false) %}
-              {% set delay_seconds = (repeat.item.window_open_delay | default(0) | float) * 60 %}
+              {% set delay_seconds =
+                (repeat.item.window_open_delay | default(0) | float) * 60 %}
               {% for window in repeat.item.windows | default([]) %}
                 {% if is_state(window, 'on') %}
-                  {% set open_seconds =
-                       as_timestamp(now()) - as_timestamp(states[window].last_changed) %}
-                  {% if open_seconds >= delay_seconds %}
-                    {% set ns.blocked = true %}
+                  {% set window_state = states.get(window) %}
+                  {% if window_state is not none %}
+                    {% set open_seconds =
+                      as_timestamp(now())
+                      - as_timestamp(window_state.last_changed) %}
+                    {% if open_seconds >= delay_seconds %}
+                      {% set ns.blocked = true %}
+                    {% endif %}
                   {% endif %}
                 {% endif %}
               {% endfor %}
               {{ ns.blocked }}
 
             current_hvac_mode: "{{ states(repeat.item.thermostat) }}"
+
             current_temperature: >
-              {{ state_attr(repeat.item.thermostat, 'temperature') | float(-99) }}
+              {{
+                state_attr(
+                  repeat.item.thermostat,
+                  'temperature'
+                ) | float(-99)
+              }}
 
         - choose:
             - conditions:
@@ -383,7 +400,10 @@ actions:
                         {{
                           current_hvac_mode != 'off'
                           or
-                          (current_temperature - (summer_temperature | float)) | abs > 0.1
+                          (
+                            current_temperature
+                            - (summer_temperature | float)
+                          ) | abs > 0.1
                         }}
                   then:
                     - action: climate.set_temperature
@@ -404,23 +424,26 @@ actions:
                         heating_event: "Heizung: Sommermodus"
                         heating_message: >
                           {{ radiator_name }} wurde auf
-                          {{ summer_temperature }} °C gestellt und ausgeschaltet.
+                          {{ summer_temperature }} °C gestellt
+                          und ausgeschaltet.
 
                     - choose:
                         - conditions:
                             - condition: template
-                              value_template: "{{ notifications_enabled }}"
+                              value_template: >
+                                {{ notifications_enabled | bool }}
                           sequence: !input notification_action
 
           default:
             - choose:
                 - conditions:
                     - condition: template
-                      value_template: "{{ window_blocked }}"
+                      value_template: "{{ window_blocked | bool }}"
                   sequence:
                     - if:
                         - condition: template
-                          value_template: "{{ current_hvac_mode != 'off' }}"
+                          value_template: >
+                            {{ current_hvac_mode != 'off' }}
                       then:
                         - action: climate.set_hvac_mode
                           target:
@@ -433,14 +456,16 @@ actions:
                             heating_event: "Heizung: Fenster offen"
                             heating_message: >
                               {{ radiator_name }} wurde ausgeschaltet,
-                              weil mindestens ein zugeordnetes Fenster länger
-                              als {{ window_delay_minutes | round(0) }} Minuten
-                              geöffnet ist.
+                              weil mindestens ein zugeordnetes Fenster
+                              länger als
+                              {{ window_delay_minutes | round(0) }}
+                              Minuten geöffnet ist.
 
                         - choose:
                             - conditions:
                                 - condition: template
-                                  value_template: "{{ notifications_enabled }}"
+                                  value_template: >
+                                    {{ notifications_enabled | bool }}
                               sequence: !input notification_action
 
               default:
@@ -462,7 +487,8 @@ actions:
                 # Normalbetrieb läuft konsequent im HVAC-Modus AUTO.
                 - if:
                     - condition: template
-                      value_template: "{{ states(thermostat) != 'auto' }}"
+                      value_template: >
+                        {{ states(thermostat) != 'auto' }}
                   then:
                     - action: climate.set_hvac_mode
                       target:
@@ -476,7 +502,10 @@ actions:
                       value_template: >
                         {{
                           (
-                            state_attr(thermostat, 'temperature') | float(-99)
+                            state_attr(
+                              thermostat,
+                              'temperature'
+                            ) | float(-99)
                             - desired_temperature | float
                           ) | abs > 0.1
                         }}
@@ -498,8 +527,10 @@ actions:
                     - choose:
                         - conditions:
                             - condition: template
-                              value_template: "{{ notifications_enabled }}"
+                              value_template: >
+                                {{ notifications_enabled | bool }}
                           sequence: !input notification_action
 
 mode: single
 max_exceeded: silent
+```
